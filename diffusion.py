@@ -200,7 +200,8 @@ class GaussianDiffusion(object):
                          condition_fn=None,
                          guide_scale=None,
                          ddim_timesteps=20,
-                         eta=0.0):
+                         eta=0.0,
+                         bar: bool = False):
         # prepare input
         b = noise.size(0)
         xt = noise
@@ -209,6 +210,9 @@ class GaussianDiffusion(object):
         steps = (1 + torch.arange(0, self.num_timesteps,
                                   self.num_timesteps // ddim_timesteps)).clamp(
                                       0, self.num_timesteps - 1).flip(0)
+        if bar:
+            from tqdm.auto import tqdm
+            steps = tqdm(steps, dynamic_ncols=True)
         for step in steps:
             t = torch.full((b, ), step, dtype=torch.long, device=xt.device)
             xt, _ = self.ddim_sample(xt, t, model, model_kwargs, clamp,

@@ -15,8 +15,10 @@ from diffusion import GaussianDiffusion, beta_schedule
 
 
 class SDVideo:
-    def __init__(self, model_path: str, device: str | torch.device = torch.device('cpu')):
+    def __init__(self, model_path: str, device: str | torch.device = torch.device('cpu'), dtype: torch.dtype = torch.float32, amp: bool = True):
         self.device = torch.device(device)
+        self.dtype = dtype
+        self.amp = amp
         with open(os.path.join(model_path, 'configuration.json'), 'r') as f:
             self.config: dict[str, Any] = json.load(f)
         cfg = self.config['model']['model_cfg']
@@ -42,7 +44,7 @@ class SDVideo:
                 torch.load(os.path.join(model_path, self.config['model']['model_args']['ckpt_unet'])),
                 strict = True
         )
-        self.unet = self.unet.eval().requires_grad_(False)
+        self.unet = self.unet.to(dtype).eval().requires_grad_(False)
         self.unet.to(self.device)
 
         betas = beta_schedule(
@@ -76,21 +78,37 @@ class SDVideo:
                 4,
                 os.path.join(model_path, self.config['model']['model_args']['ckpt_autoencoder'])
         )
-        self.vae = self.vae.eval().requires_grad_(False)
+        self.vae = self.vae.to(dtype).eval().requires_grad_(False)
         self.vae.to(self.device)
 
         self.text_encoder: FrozenOpenCLIPEmbedder = FrozenOpenCLIPEmbedder(
                 version = os.path.join(model_path, self.config['model']['model_args']['ckpt_clip']),
                 layer = 'penultimate'
         )
-        self.text_encoder = self.text_encoder.eval().requires_grad_(False)
+        self.text_encoder = self.text_encoder.to(dtype).eval().requires_grad_(False)
         self.text_encoder.to(self.device)
 
-    def __call__(self, text: str, text_neg: str = '') -> list[list[np.ndarray]]:
+    @torch.inference_mode()
+    def __call__(self,
+            text: str,
+            text_neg: str = '',
+            guidance_scale: float = 9.0,
+            timesteps: int = 50,
+            image_size: tuple[int, int] = (256, 256),
+            num_frames: int | None = None,
+            bar: bool = False
+    ) -> torch.Tensor:
         text_emb, text_emb_neg = self.preprocess(text, text_neg)
-        y = self.process(text_emb, text_emb_neg)
-        out = self.postprocess(y)
-        return out
+        y = self.process(
+                text_emb, text_emb_neg,
+                guidance_scale = guidance_scale,
+                timesteps = timesteps,
+                image_size = image_size,
+                num_frames = num_frames or self.max_frames,
+                bar = bar
+        )
+        frames = self.postprocess(y)
+        return frames # f c h w
 
     def preprocess(self, text: str, text_neg: str = '') -> tuple[torch.Tensor, torch.Tensor]:
         text_emb = self.text_encoder(text)
@@ -100,34 +118,43 @@ class SDVideo:
     def postprocess(self, x: torch.Tensor) -> dict[str, list[np.ndarray]]:
         return tensor2vid(x)
 
-    def process(self, text_emb: torch.Tensor, text_emb_neg: torch.Tensor) -> torch.Tensor:
+    def process(self,
+            text_emb: torch.Tensor,
+            text_emb_neg: torch.Tensor,
+            guidance_scale: float,
+            timesteps: int,
+            image_size: tuple[int, int],
+            num_frames: int,
+            batch_size: int = 1,
+            eta: float = 0.0,
+            bar: bool = False
+    ) -> torch.Tensor:
         context = torch.cat([text_emb_neg, text_emb], dim = 0).to(self.device)
         # synthesis
-        with torch.no_grad():
-            num_sample = 1  # here let b = 1
-            latent_h, latent_w = 32, 32
-            with torch.autocast(self.device.type, enabled=True):
-                x0 = self.diffusion.ddim_sample_loop(
-                        noise = torch.randn(num_sample, 4, self.max_frames, latent_h, latent_w).to(self.device),  # shape: b c f h w
-                        model = self.unet,
-                        model_kwargs = [{
-                            'y': context[1].unsqueeze(0).repeat(num_sample, 1, 1)
-                        }, {
-                            'y': context[0].unsqueeze(0).repeat(num_sample, 1, 1)
-                        }],
-                        guide_scale = 9.0,
-                        ddim_timesteps = 50,
-                        eta = 0.0
-                )
+        num_sample = batch_size
+        latent_h, latent_w = image_size[1] // 8, image_size[0] // 8
+        with torch.autocast(self.device.type, enabled=self.amp):
+            x0 = self.diffusion.ddim_sample_loop(
+                    noise = torch.randn(num_sample, 4, num_frames, latent_h, latent_w, device = self.device, dtype=self.dtype),  # shape: b c f h w
+                    model = self.unet,
+                    model_kwargs = [{
+                        'y': context[1].unsqueeze(0).repeat(num_sample, 1, 1)
+                    }, {
+                        'y': context[0].unsqueeze(0).repeat(num_sample, 1, 1)
+                    }],
+                    guide_scale = guidance_scale,
+                    ddim_timesteps = timesteps,
+                    eta = eta,
+                    bar = bar
+            )
 
-                scale_factor = 0.18215
-                video_data = 1. / scale_factor * x0
-                bs_vd = video_data.shape[0]
-                video_data = rearrange(video_data, 'b c f h w -> (b f) c h w')
-                self.vae.to(self.device)
-                video_data = self.vae.decode(video_data)
-                video_data = rearrange(
-                    video_data, '(b f) c h w -> b c f h w', b = bs_vd)
+            scale_factor = 0.18215
+            video_data = 1. / scale_factor * x0
+            bs_vd = video_data.shape[0]
+            video_data = rearrange(video_data, 'b c f h w -> (b f) c h w')
+            video_data = self.vae.decode(video_data)
+            video_data = rearrange(
+                video_data, '(b f) c h w -> b c f h w', b = bs_vd)
         return video_data
 
 
