@@ -27,5 +27,15 @@ model(
   bar = False, # display TQDM progress bar for sampling process
 )
 ```
+
+## Model options
+```
+model = SDVideo(
+  model_path = 'path/to/model', # path to model and configuration.json
+  device = 'cuda', # device (string or torch.device)
+  dtype = torch.float32, # load model in precision (only float types, float32, float16, bfloat16)
+  amp = True # sample with automatic mixed preicision
+)
+```
   
   
