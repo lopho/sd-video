@@ -6,7 +6,7 @@ def _i(tensor, t, x):
     r"""Index tensor using t and format the output according to x.
     """
     shape = (x.size(0), ) + (1, ) * (x.ndim - 1)
-    return tensor.cuda()[t].view(shape).to(x)
+    return tensor.to(t.device)[t].view(shape).to(x)
 
 
 def beta_schedule(schedule,
