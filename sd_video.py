@@ -146,9 +146,14 @@ def tensor2vid(
     images = rearrange(video, 'i c f h w -> f h (i w) c')  # f h w c
     return images
 
-def save_vid(images: torch.Tensor, path: str) -> None:
+def save_pngs(images: torch.Tensor, path: str) -> None:
     images = images.mul(255).round().clamp(0, 255).to(dtype = torch.uint8, device = 'cpu').numpy()
     os.makedirs(path, exist_ok=True)
     for i,x in enumerate(images):
         Image.fromarray(x).save(os.path.join(path, str(i).zfill(4) + '.png'))
 
+def save_gif(images: torch.Tensor, path: str, duration=2, optimize=False):
+    images = images.mul(255).round().clamp(0, 255).to(dtype = torch.uint8, device = 'cpu').numpy()
+    image_list = [Image.fromarray(x) for x in images]
+    duration = duration*1000/len(image_list)
+    image_list[0].save(path, save_all=True, append_images=image_list[1:], duration=duration, optimize=optimize, loop=0)
