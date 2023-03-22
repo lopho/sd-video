@@ -8,7 +8,7 @@ Text to Video
 ### Text 2 Video
 ```py
 from sd_video import SDVideo, save_gif
-model = SDVideo('/path/to/model_and_config', 'cuda')
+model = SDVideo('/path/to/model_and_config', 'cuda', dtype=torch.float16)
 # if installed, use xformers for a small performance boost
 model.enable_xformers(True)
 x = model('arnold schwarzenegger eating a giant cheeseburger')
