@@ -4,6 +4,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+xformers_imported = False
+try:
+    import xformers.ops
+    xformers_imported = True
+    print('VAE: Using xformers')
+except ImportError:
+    print('VAE: xformers not installed, continuing without it')
+
 
 def nonlinearity(x):
     # swish
@@ -140,6 +148,24 @@ class AttnBlock(nn.Module):
             in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x):
+        if xformers_imported:
+            return self._forward_xformers(x)
+        else:
+            return self._forward(x)
+
+    def _forward_xformers(self, x):
+        h_ = x
+        h_ = self.norm(h_)
+        q = self.q(h_)
+        k = self.k(h_)
+        v = self.v(h_)
+        b, c, h, w = q.shape
+        h_ = xformers.ops.memory_efficient_attention(q, k, v, scale=(int(c) ** (-0.5)))
+        h_ = self.proj_out(h_)
+
+        return x + h_
+
+    def _forward(self, x):
         h_ = x
         h_ = self.norm(h_)
         q = self.q(h_)
