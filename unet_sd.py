@@ -16,6 +16,14 @@ def default(val, d):
         return val
     return d() if callable(d) else d
 
+xformers_imported = False
+try:
+    import xformers.ops
+    xformers_imported = True
+    print('UNET: Using xformers')
+except ImportError:
+    print('UNET: xformers not installed, continuing without it')
+
 
 class UNetSD(nn.Module):
 
@@ -399,6 +407,12 @@ class CrossAttention(nn.Module):
             nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
 
     def forward(self, x, context=None, mask=None):
+        if xformers_imported:
+            return self._forward_xformers(x, context, mask)
+        else:
+            return self._forward(x, context, mask)
+
+    def _forward(self, x, context=None, mask=None):
         h = self.heads
 
         q = self.to_q(x)
@@ -423,6 +437,22 @@ class CrossAttention(nn.Module):
         out = torch.einsum('b i j, b j d -> b i d', sim, v)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
         return self.to_out(out)
+
+    def _forward_xformers(self, x, context=None, mask=None):
+        if mask is not None:
+            raise NotImplementedError("Masking with xformers is not yet supported")
+        h = self.heads
+
+        q = self.to_q(x)
+        context = default(context, x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h),
+                      (q, k, v))
+        out = xformers.ops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
+        out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        return self.to_out(out)
+
 
 
 class SpatialTransformer(nn.Module):
