@@ -1,5 +1,6 @@
 
 import torch
+from torch import nn
 
 
 def _i(tensor, t, x):
@@ -12,7 +13,7 @@ def _i(tensor, t, x):
 def beta_schedule(schedule,
                   num_timesteps=1000,
                   init_beta=None,
-                  last_beta=None):
+                  last_beta=None) -> torch.Tensor:
     if schedule == 'linear_sd':
         return torch.linspace(
             init_beta**0.5, last_beta**0.5, num_timesteps,
@@ -21,7 +22,7 @@ def beta_schedule(schedule,
         raise ValueError(f'Unsupported schedule: {schedule}')
 
 
-class GaussianDiffusion(object):
+class GaussianDiffusion(nn.Module):
     r""" Diffusion Model for DDIM.
     "Denoising diffusion implicit models." by Song, Jiaming, Chenlin Meng, and Stefano Ermon.
     See https://arxiv.org/abs/2010.02502
@@ -33,7 +34,9 @@ class GaussianDiffusion(object):
                  var_type='learned_range',
                  loss_type='mse',
                  epsilon=1e-12,
-                 rescale_timesteps=False):
+                 rescale_timesteps=False
+    ) -> None:
+        super().__init__()
         # check input
         if not isinstance(betas, torch.DoubleTensor):
             betas = torch.tensor(betas, dtype=torch.float64)
@@ -56,33 +59,22 @@ class GaussianDiffusion(object):
 
         # alphas
         alphas = 1 - self.betas
-        self.alphas_cumprod = torch.cumprod(alphas, dim=0)
-        self.alphas_cumprod_prev = torch.cat(
-            [alphas.new_ones([1]), self.alphas_cumprod[:-1]])
-        self.alphas_cumprod_next = torch.cat(
-            [self.alphas_cumprod[1:],
-             alphas.new_zeros([1])])
+        self.register_buffer('alphas_cumprod', torch.cumprod(alphas, dim=0))
+        self.register_buffer('alphas_cumprod_prev', torch.cat([alphas.new_ones([1]), self.alphas_cumprod[:-1]]))
+        self.register_buffer('alphas_cumprod_next', torch.cat([self.alphas_cumprod[1:], alphas.new_zeros([1])]))
 
         # q(x_t | x_{t-1})
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0
-                                                        - self.alphas_cumprod)
-        self.log_one_minus_alphas_cumprod = torch.log(1.0
-                                                      - self.alphas_cumprod)
-        self.sqrt_recip_alphas_cumprod = torch.sqrt(1.0 / self.alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1.0 / self.alphas_cumprod
-                                                      - 1)
+        self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(self.alphas_cumprod))
+        self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1.0 - self.alphas_cumprod))
+        self.register_buffer('log_one_minus_alphas_cumprod', torch.log(1.0 - self.alphas_cumprod))
+        self.register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1.0 / self.alphas_cumprod))
+        self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1.0 / self.alphas_cumprod - 1))
 
         # q(x_{t-1} | x_t, x_0)
-        self.posterior_variance = betas * (1.0 - self.alphas_cumprod_prev) / (
-            1.0 - self.alphas_cumprod)
-        self.posterior_log_variance_clipped = torch.log(
-            self.posterior_variance.clamp(1e-20))
-        self.posterior_mean_coef1 = betas * torch.sqrt(
-            self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-        self.posterior_mean_coef2 = (
-            1.0 - self.alphas_cumprod_prev) * torch.sqrt(alphas) / (
-                1.0 - self.alphas_cumprod)
+        self.register_buffer('posterior_variance',betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod))
+        self.register_buffer('posterior_log_variance_clipped',torch.log(self.posterior_variance.clamp(1e-20)))
+        self.register_buffer('posterior_mean_coef1',betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod))
+        self.register_buffer('posterior_mean_coef2',(1.0 - self.alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - self.alphas_cumprod))
 
     def p_mean_variance(self,
                         xt,
@@ -201,7 +193,9 @@ class GaussianDiffusion(object):
                          guide_scale=None,
                          ddim_timesteps=20,
                          eta=0.0,
-                         bar: bool = False):
+                         bar: bool = False,
+                         t_start: int = 0
+    ):
         # prepare input
         b = noise.size(0)
         xt = noise
@@ -209,7 +203,10 @@ class GaussianDiffusion(object):
         # diffusion process (TODO: clamp is inaccurate! Consider replacing the stride by explicit prev/next steps)
         steps = (1 + torch.arange(0, self.num_timesteps,
                                   self.num_timesteps // ddim_timesteps)).clamp(
-                                      0, self.num_timesteps - 1).flip(0)
+                                      0, self.num_timesteps - 1)
+        if t_start > 0:
+            steps = steps[:t_start]
+        steps = steps.flip(0)
         if bar:
             from tqdm.auto import tqdm
             steps = tqdm(steps, dynamic_ncols=True)
@@ -224,3 +221,16 @@ class GaussianDiffusion(object):
         if self.rescale_timesteps:
             return t.float() * 1000.0 / self.num_timesteps
         return t
+
+    @torch.no_grad()
+    def stochastic_encode(self, x0, t, timesteps, noise=None):
+        if noise is None:
+            noise = torch.randn_like(x0)
+        c = self.num_timesteps // timesteps
+        ddim_timesteps = torch.tensor((list(range(0, self.num_timesteps, c))), device=self.alphas_cumprod.device) + 1
+        ddim_alphas = self.alphas_cumprod[ddim_timesteps]
+        sqrt_alphas_cumprod = torch.sqrt(ddim_alphas)
+        sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - ddim_alphas)
+        return (_i(sqrt_alphas_cumprod, t, x0) * x0 +
+                _i(sqrt_one_minus_alphas_cumprod, t, x0) * noise)
+

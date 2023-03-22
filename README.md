@@ -4,6 +4,8 @@ Text to Video
 
 
 ## Example
+
+### Text 2 Video
 ```py
 from sd_video import SDVideo, save_gif
 model = SDVideo('/path/to/model_and_config', 'cuda')
@@ -12,6 +14,25 @@ save_gif(x, 'output.gif')
 ```
 
 ![](examples/arnold_burger.gif)
+
+### Video 2 Video
+```py
+  denoise_strength = 0.7
+  timesteps = 50
+  model = SDVideo('/path/to/model_and_config', 'cuda')
+  init_frames = load_sequence('path/to/image_sequence')
+  x = model(
+          'very wrinkly and old',
+          initial_frames = init_frames,
+          bar = True,
+          timesteps = timesteps,
+          t_start = round(timesteps * denoise_strength)
+  )
+  save_gif(x, 'output.gif')
+```
+
+![](examples/old_input.gif)
+![](examples/old.gif)
 
 
 ## Sampling options
@@ -37,5 +58,3 @@ model = SDVideo(
   amp = True # sample with automatic mixed preicision
 )
 ```
-  
-  
