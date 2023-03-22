@@ -6,23 +6,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
+_xformers_imported = False
+try:
+    import xformers.ops
+    _xformers_imported = True
+except ImportError:
+    _xformers_imported = False
+
 
 def exists(x):
     return x is not None
-
 
 def default(val, d):
     if exists(val):
         return val
     return d() if callable(d) else d
-
-xformers_imported = False
-try:
-    import xformers.ops
-    xformers_imported = True
-    print('UNET: Using xformers')
-except ImportError:
-    print('UNET: xformers not installed, continuing without it')
 
 
 class UNetSD(nn.Module):
@@ -252,6 +250,23 @@ class UNetSD(nn.Module):
         # zero out the last layer params
         nn.init.zeros_(self.out[-1].weight)
 
+        self._use_xformers: bool = False
+
+    def enable_xformers(self, enable: bool = True) -> None:
+        if enable:
+            if not _xformers_imported:
+                self._use_xformers = False
+                print('xformers library not found, please install xformers first')
+            else:
+                self._use_xformers = True
+        else:
+            self._use_xformers = False
+        def recurse_enable_xformers(m):
+            if hasattr(m, 'enable_xformers'):
+                m.enable_xformers(enable)
+        for c in self.children():
+            c.apply(recurse_enable_xformers)
+
     def forward(
             self,
             x,
@@ -406,8 +421,13 @@ class CrossAttention(nn.Module):
         self.to_out = nn.Sequential(
             nn.Linear(inner_dim, query_dim), nn.Dropout(dropout))
 
+        self._use_xformers = False
+
+    def enable_xformers(self, enable: bool = True) -> None:
+        self._use_xformers = enable and _xformers_imported
+
     def forward(self, x, context=None, mask=None):
-        if xformers_imported:
+        if self._use_xformers:
             return self._forward_xformers(x, context, mask)
         else:
             return self._forward(x, context, mask)

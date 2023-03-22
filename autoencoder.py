@@ -4,19 +4,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-xformers_imported = False
+_xformers_imported = False
 try:
     import xformers.ops
-    xformers_imported = True
-    print('VAE: Using xformers')
-except ImportError:
-    print('VAE: xformers not installed, continuing without it')
+    _xformers_imported = True
+except:
+    _xformers_imported = False
 
 
 def nonlinearity(x):
     # swish
     return x * torch.sigmoid(x)
-
 
 def Normalize(in_channels, num_groups=32):
     return torch.nn.GroupNorm(
@@ -147,8 +145,13 @@ class AttnBlock(nn.Module):
         self.proj_out = torch.nn.Conv2d(
             in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
+        self._use_xformers: bool = False
+
+    def enable_xformers(self, enable: bool = True) -> None:
+        self._use_xformers = enable and _xformers_imported
+
     def forward(self, x):
-        if xformers_imported:
+        if self._use_xformers:
             return self._forward_xformers(x)
         else:
             return self._forward(x)
@@ -482,6 +485,24 @@ class AutoencoderKL(nn.Module):
 
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path)
+
+        self._use_xformers: bool = False
+
+    def enable_xformers(self, enable: bool = True) -> None:
+        if enable:
+            if not _xformers_imported:
+                self._use_xformers = False
+                print('xformers library not found, please install xformers first')
+            else:
+                self._use_xformers = True
+        else:
+            self._use_xformers = False
+        def recurse_enable_xformers(m):
+            if hasattr(m, 'enable_xformers'):
+                m.enable_xformers(enable)
+        for c in self.children():
+            c.apply(recurse_enable_xformers)
+
 
     def init_from_ckpt(self, path):
         sd = torch.load(path, map_location='cpu')['state_dict']

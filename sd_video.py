@@ -13,7 +13,6 @@ from autoencoder import AutoencoderKL
 from clip_embedder import FrozenOpenCLIPEmbedder
 from diffusion import GaussianDiffusion, beta_schedule
 
-
 class SDVideo:
     def __init__(self,
             model_path: str,
@@ -93,6 +92,10 @@ class SDVideo:
         )
         self.text_encoder = self.text_encoder.to(dtype).eval().requires_grad_(False)
         self.text_encoder = self.text_encoder.to(device, memory_format = torch.contiguous_format)
+
+    def enable_xformers(self, enable: bool = True) -> None:
+        self.unet.enable_xformers(enable)
+        self.vae.enable_xformers(enable)
 
     @torch.inference_mode()
     def __call__(self,
@@ -223,7 +226,7 @@ def denormalize(
         std = (std,) * 3
     mean = torch.tensor(mean, device = video.device).reshape(1, -1, 1, 1, 1)  # n c f h w
     std = torch.tensor(std, device = video.device).reshape(1, -1, 1, 1, 1)  # n c f h w
-    video = video.mul_(std).add_(mean)
+    video = video.mul(std).add(mean)
     return video
 
 def load_sequence(path: str, frames: int = 16, offset: int = 0, stride: int = 1, image_size: tuple[int, int] = (256, 256)):
