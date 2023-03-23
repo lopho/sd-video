@@ -1,2 +1,3 @@
 torch
 open_clip_torch
+einops

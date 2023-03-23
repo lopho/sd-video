@@ -77,4 +77,4 @@ Partly based on the following works
   - https://github.com/modelscope/modelscope/blob/master/modelscope/pipelines/multi_modal/text_to_video_synthesis_pipeline.py (licensed Apache 2.0 at the time of copy)
   - https://github.com/modelscope/modelscope/tree/master/modelscope/models/multi_modal/video_synthesis (licensed Apache 2.0 at the time of copy)
 
-All other code is released under the Affero GNU Public License v3 (AGPLv3).
+All other code is released under the GNU Affero General Public License v3 (AGPLv3).
