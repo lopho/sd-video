@@ -6,14 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-_xformers_imported = False
-try:
-    import xformers.ops
-    _xformers_imported = True
-except ImportError:
-    _xformers_imported = False
-
-
 def exists(x):
     return x is not None
 
@@ -21,6 +13,13 @@ def default(val, d):
     if exists(val):
         return val
     return d() if callable(d) else d
+
+_xformers_imported = False
+try:
+    import xformers.ops
+    _xformers_imported = True
+except ImportError:
+    _xformers_imported = False
 
 
 class UNetSD(nn.Module):

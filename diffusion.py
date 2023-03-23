@@ -76,6 +76,16 @@ class GaussianDiffusion(nn.Module):
         self.register_buffer('posterior_mean_coef1',betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod))
         self.register_buffer('posterior_mean_coef2',(1.0 - self.alphas_cumprod_prev) * torch.sqrt(alphas) / (1.0 - self.alphas_cumprod))
 
+    def q_sample(self,
+            x_start: torch.Tensor,
+            t: torch.Tensor,
+            noise: torch.Tensor = None
+    ) -> torch.Tensor:
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        return (_i(self.sqrt_alphas_cumprod, t, x_start) * x_start +
+                _i(self.sqrt_one_minus_alphas_cumprod, t, x_start) * noise)
+
     def p_mean_variance(self,
                         xt,
                         t,

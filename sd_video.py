@@ -13,6 +13,7 @@ from autoencoder import AutoencoderKL
 from clip_embedder import FrozenOpenCLIPEmbedder
 from diffusion import GaussianDiffusion, beta_schedule
 
+
 class SDVideo:
     def __init__(self,
             model_path: str,
@@ -93,11 +94,12 @@ class SDVideo:
         self.text_encoder = self.text_encoder.to(dtype).eval().requires_grad_(False)
         self.text_encoder = self.text_encoder.to(device, memory_format = torch.contiguous_format)
 
-    def enable_xformers(self, enable: bool = True) -> None:
+    def enable_xformers(self, enable: bool = True) -> 'SDVideo':
         self.unet.enable_xformers(enable)
         self.vae.enable_xformers(enable)
+        return self
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def __call__(self,
             text: str,
             text_neg: str = '',
@@ -169,11 +171,11 @@ class SDVideo:
             ).div(255).mul(2).sub(1)
             with torch.autocast(self.device.type, enabled = self.amp):
                 init_x = self.vae.encode(init_x).mean * 0.18215
-            steps = torch.full((num_frames, ), t_start-1, device=self.device)
+            steps = torch.full((num_frames, ), t_start - 1, device = self.device)
             init_x = self.diffusion.stochastic_encode(init_x, steps, timesteps)
             # f c h w -> b f c h w -> b c f h w
-            init_x = init_x.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1).permute(0,2,1,3,4)
-
+            init_x = init_x.unsqueeze(0).repeat(batch_size, 1, 1, 1, 1).permute(0, 2, 1, 3, 4)
+        init_x = init_x.to(memory_format = torch.contiguous_format)
         return text_emb, text_emb_neg, init_x
 
     def postprocess(self, x: torch.Tensor) -> dict[str, list[np.ndarray]]:
@@ -257,3 +259,4 @@ def save_gif(images: torch.Tensor, path: str, duration=2, optimize=False):
     image_list = [Image.fromarray(x) for x in images]
     duration = duration*1000/len(image_list)
     image_list[0].save(path, save_all=True, append_images=image_list[1:], duration=duration, optimize=optimize, loop=0)
+
