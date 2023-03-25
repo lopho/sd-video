@@ -1,3 +1,12 @@
 torch
 open_clip_torch
 einops
+pytorch_lightning
+accelerate
+numpy
+pillow
+
+# To install xformers on torch 2.0
+# pip install -U --pre xformers
+# or install it from source
+# https://github.com/facebookresearch/xformers/issues/693
