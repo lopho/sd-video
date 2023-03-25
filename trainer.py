@@ -217,7 +217,7 @@ class SDVideoTrainer:
 
         if unconditional_ratio > 0:
             with torch.no_grad(), self.accelerator.autocast():
-                self.t_emb_uncond = self.text_encoder([''] * dataloader.batch_size)
+                self.t_emb_uncond = self.text_encoder([''] * dataloader.batch_size).to(dtype = torch.float32)
         self.unconditional_ratio = unconditional_ratio
 
     @torch.no_grad()
@@ -281,12 +281,12 @@ class SDVideoTrainer:
             t_emb = self.t_emb_uncond
         else:
             with self.accelerator.autocast():
-                t_emb = self.text_encoder(text)
+                t_emb = self.text_encoder(text).to(dtype = torch.float32)
 
         bs = len(frames)
         frames = rearrange(frames, 'b f c h w -> (b f) c h w')
         with self.accelerator.autocast():
-            x0 = self.vae.encode(frames).sample() * 0.18215
+            x0 = self.vae.encode(frames).sample().to(dtype = torch.float32) * 0.18215
         x0 = rearrange(x0, '(b f) c h w -> b c f h w', b = bs)
 
         t = torch.randint(
@@ -304,7 +304,7 @@ class SDVideoTrainer:
 
         with torch.enable_grad(), self.accelerator.accumulate(self.unet):
             with self.accelerator.autocast():
-                y = self.unet(x_noisy, t, t_emb)
+                y = self.unet(x_noisy, t, t_emb).to(dtype = torch.float32)
             loss = torch.nn.functional.mse_loss(y, noise)
             self.accelerator.backward(loss)
             if self.accelerator.sync_gradients:
