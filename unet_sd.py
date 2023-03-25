@@ -468,7 +468,7 @@ class CrossAttention(nn.Module):
         v = self.to_v(context)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h),
                       (q, k, v))
-        out = xformers.ops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
+        out = xformers.ops.memory_efficient_attention(q, k, v, scale=self.scale)
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
         return self.to_out(out)
 
