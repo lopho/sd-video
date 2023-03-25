@@ -109,7 +109,7 @@ def frame_sequence_collate_fn(
         text_path = s['text_path']
         frames_paths = s['frame_path_list']
 
-        with open(os.path.join(text_path), 'r') as f:
+        with open(text_path, 'r') as f:
             text = f.read().strip()
         text = text + ", watermark"
         captions.append(text)
