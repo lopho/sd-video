@@ -162,7 +162,8 @@ class SDVideoTrainer:
             xformers: bool = True,
             output_dir: str = 'output',
             load_state: str | None = None,
-            log_with: str | None = None
+            log_with: str | None = None,
+            seed: int = 0,
     ) -> None:
         """
         Expects batches from dataloader in the following format:
@@ -178,9 +179,9 @@ class SDVideoTrainer:
         torch.backends.cuda.enable_math_sdp(True)
         torch._dynamo.config.cache_size_limit = 256
         torch._dynamo.config.allow_rnn = True
-        random.seed(0)
-        np.random.seed(0)
-        torch.manual_seed(0)
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
         self.output_dir = output_dir
         self.accelerator = Accelerator(
             mixed_precision = 'fp16',
@@ -195,15 +196,19 @@ class SDVideoTrainer:
 
         self.batch_size = dataloader.batch_size
         self.epochs = epochs
-        self.total_steps = len(dataloader) * epochs
+        self.total_steps: int = math.ceil(len(dataloader) / (self.accelerator.gradient_accumulation_steps * self.accelerator.num_processes)) * epochs
+
         if scale_lr:
             lr = lr * self.batch_size * self.accelerator.gradient_accumulation_steps * self.accelerator.num_processes
         optimizer = torch.optim.AdamW(unet.parameters(), lr = lr)
+        scheduler_steps = math.ceil((len(dataloader) * epochs) / (self.accelerator.gradient_accumulation_steps))
         scheduler = lr_dahd_cyclic(
                 optimizer,
-                warmup = math.ceil(lr_warmup * self.total_steps),
-                decay = math.ceil(lr_decay * self.total_steps)
+                delay = 1,
+                warmup = math.ceil(lr_warmup * scheduler_steps),
+                decay = math.ceil(lr_decay * scheduler_steps)
         )
+
         self.optimizer: torch.optim.Optimizer = self.accelerator.prepare(optimizer)
         self.scheduler: torch.optim.lr_scheduler.LRScheduler = self.accelerator.prepare_scheduler(scheduler)
         self.dataloader: DataLoader = self.accelerator.prepare(dataloader)
@@ -229,7 +234,7 @@ class SDVideoTrainer:
         samples_seen: int = 0
         samples_per_update = (
                 self.batch_size * 
-                self.accelerator.gradient_accumulation_steps * 
+                self.accelerator.gradient_accumulation_steps *
                 self.accelerator.num_processes
         )
         if self.accelerator.is_main_process:
@@ -242,30 +247,34 @@ class SDVideoTrainer:
         self.accelerator.wait_for_everyone()
         for epoch in range(self.epochs):
             for b in self.dataloader:
-                loss = loss + self.step(b)
+                loss = loss + self.step(b) / self.accelerator.gradient_accumulation_steps
                 if self.accelerator.sync_gradients:
                     mean_loss = self.accelerator.gather(loss).mean()
                     loss.zero_()
+                    update_step += 1
                     if self.accelerator.is_main_process:
-                        update_step += 1
                         samples_seen += samples_per_update
-                        mean_loss = (mean_loss / self.accelerator.gradient_accumulation_steps).item()
-                        track_loss.append(mean_loss)
+                        track_loss.append(mean_loss.item())
                         track_lr.append(self.scheduler.get_last_lr()[0])
-                        if update_step % log_every == 0:
+                        if update_step % log_every == 0 or update_step == self.total_steps:
                             stats = {
                                 'loss': sum(track_loss) / len(track_loss),
-                                'lr': sum(track_lr) / len(track_lr)
+                                'lr': sum(track_lr) / len(track_lr),
+                                'samples': samples_seen,
+                                'epoch': epoch
                             }
                             if verbose:
-                                tqdm.write(str(stats))
+                                tqdm.write(f'{update_step}: {stats}')
                             pbar.set_postfix(stats)
                             self.accelerator.log(stats, step = update_step)
                             track_loss.clear()
                             track_lr.clear()
                         pbar.update(1)
-                    if update_step % save_every == 0:
-                        self.accelerator.save_state(os.path.join(self.output_dir, f'{run_name}_{str(update_step).zfill(len(str(self.total_steps)))}'))
+                    if update_step % save_every == 0 or update_step == self.total_steps:
+                        self.accelerator.save_state(os.path.join(
+                                self.output_dir,
+                                f'{run_name}_{str(update_step).zfill(len(str(self.total_steps)))}'
+                        ))
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
             net = self.accelerator.unwrap_model(self.unet, False).cpu()
@@ -310,7 +319,7 @@ class SDVideoTrainer:
             if self.accelerator.sync_gradients:
                 self.accelerator.clip_grad_norm_(self.unet.parameters(), 1.0)
             self.optimizer.step()
-            if not self.accelerator.optimizer_step_was_skipped:
+            if not self.accelerator.optimizer_step_was_skipped and self.accelerator.sync_gradients:
                 self.scheduler.step()
             self.optimizer.zero_grad(set_to_none = True)
         return loss.detach()
