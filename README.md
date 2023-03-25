@@ -52,7 +52,7 @@ model(
 ```
 
 ## Model options
-```
+```py
 model = SDVideo(
   model_path = 'path/to/model', # path to model and configuration.json
   device = 'cuda', # device (string or torch.device)
@@ -60,6 +60,39 @@ model = SDVideo(
   amp = True # sample with automatic mixed preicision
 )
 ```
+
+## Training
+```py
+  from torch.utils.data import DataLoader
+  from sd_video import SDVideo
+  from functools import partial
+  from trainer import SDVideoTrainer, MiniTestSet, collate_fn
+  model = SDVideo('path/to/model')
+  # example dataset, expects folder with gifs + text files (0001.gif, 0001.gif.txt)
+  dataset = MiniTestSet('path/to/dataset')
+  # if you write your own dataset and collate_fn
+  # the trainer expects batches in the following format:
+  # { 'pixel_values': tensor with shape b f c h w,
+  #   'text': list[str] with len == b
+  # }
+  dataloader = DataLoader(
+      dataset,
+      batch_size = 1,
+      shuffle = True,
+      num_workers = 4,
+      collate_fn = partial(collate_fn,
+              num_frames = 16,
+              image_size = (256,256),
+              dtype = torch.float32)
+      )
+  trainer = SDVideoTrainer(
+          model,
+          dataloader,
+          output_dir = 'output'
+  )
+  trainer.train(save_every = 1000, log_every = 10)
+```
+Read the code of `SDVideoTrainer`s `__init__` and `train` methods for all available training parameters.
 
 ## Model weights
 - From Huggingface
