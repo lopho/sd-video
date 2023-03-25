@@ -152,14 +152,17 @@ class SDVideoTrainer:
             model: SDVideo,
             dataloader: DataLoader,
             lr: 1e-4,
-            warmup: float = 0.,
+            scale_lr: bool = False,
+            lr_warmup: float = 0.,
+            lr_decay: float = 1.0,
             epochs: int = 1,
             gradient_accumulation: int = 1,
             unconditional_ratio: float = 0.,
             dynamo: bool = False,
             xformers: bool = True,
             output_dir: str = 'output',
-            load_state: str | None = None
+            load_state: str | None = None,
+            log_with: str | None = None
     ) -> None:
         """
         Expects batches from dataloader in the following format:
@@ -184,7 +187,7 @@ class SDVideoTrainer:
             project_dir = os.path.join(output_dir, 'logs'),
             gradient_accumulation_steps = gradient_accumulation,
             dynamo_backend = 'inductor' if dynamo else None,
-            log_with = 'aim'
+            log_with = log_with
         )
         unet = model.unet.train().requires_grad_(True)
         unet.enable_xformers(xformers)
@@ -193,11 +196,13 @@ class SDVideoTrainer:
         self.batch_size = dataloader.batch_size
         self.epochs = epochs
         self.total_steps = len(dataloader) * epochs
+        if scale_lr:
+            lr = lr * self.batch_size * self.accelerator.gradient_accumulation_steps * self.accelerator.num_processes
         optimizer = torch.optim.AdamW(unet.parameters(), lr = lr)
         scheduler = lr_dahd_cyclic(
                 optimizer,
-                warmup = round(warmup * self.total_steps),
-                decay = math.ceil(self.total_steps - (warmup * self.total_steps))
+                warmup = math.ceil(lr_warmup * self.total_steps),
+                decay = math.ceil(lr_decay * self.total_steps)
         )
         self.optimizer: torch.optim.Optimizer = self.accelerator.prepare(optimizer)
         self.scheduler: torch.optim.lr_scheduler.LRScheduler = self.accelerator.prepare_scheduler(scheduler)
@@ -215,6 +220,7 @@ class SDVideoTrainer:
                 self.t_emb_uncond = self.text_encoder([''] * dataloader.batch_size)
         self.unconditional_ratio = unconditional_ratio
 
+    @torch.no_grad()
     def train(self, run_name: str = 'vid', log_every: int = 10, save_every: int = 100, verbose: bool = True):
         loss = torch.tensor(0., device = self.accelerator.device)
         track_loss: list[float] = []
@@ -229,15 +235,14 @@ class SDVideoTrainer:
         if self.accelerator.is_main_process:
             os.makedirs(self.output_dir, exist_ok = True)
             self.accelerator.init_trackers(run_name)
-            pbar = tqdm(total = self.total_steps * samples_per_update, dynamic_ncols = True, smoothing = 0.01)
+            pbar = tqdm(total = self.total_steps, dynamic_ncols = True, smoothing = 0.01)
         torch.cuda.synchronize()
         gc.collect()
         torch.cuda.empty_cache()
         self.accelerator.wait_for_everyone()
         for epoch in range(self.epochs):
             for b in self.dataloader:
-                with self.accelerator.accumulate(self.unet):
-                    loss = loss + self.step(b)
+                loss = loss + self.step(b)
                 if self.accelerator.sync_gradients:
                     mean_loss = self.accelerator.gather(loss).mean()
                     loss.zero_()
@@ -255,10 +260,10 @@ class SDVideoTrainer:
                             if verbose:
                                 tqdm.write(str(stats))
                             pbar.set_postfix(stats)
-                            self.accelerator.log(stats, step = samples_seen)
+                            self.accelerator.log(stats, step = update_step)
                             track_loss.clear()
                             track_lr.clear()
-                        pbar.update(samples_per_update)
+                        pbar.update(1)
                     if update_step % save_every == 0:
                         self.accelerator.save_state(os.path.join(self.output_dir, f'{run_name}_{str(update_step).zfill(len(str(self.total_steps)))}'))
         self.accelerator.wait_for_everyone()
@@ -268,32 +273,36 @@ class SDVideoTrainer:
         self.accelerator.end_training()
 
     @torch.no_grad()
-    def step(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def step(self, batch: dict[str, torch.Tensor | str]) -> torch.Tensor:
         frames = batch['pixel_values'].to(device = self.accelerator.device) # b f c h w
         text = batch['text']
+
         if random.random() < self.unconditional_ratio:
             t_emb = self.t_emb_uncond
         else:
             with self.accelerator.autocast():
                 t_emb = self.text_encoder(text)
+
         bs = len(frames)
         frames = rearrange(frames, 'b f c h w -> (b f) c h w')
         with self.accelerator.autocast():
             x0 = self.vae.encode(frames).sample() * 0.18215
         x0 = rearrange(x0, '(b f) c h w -> b c f h w', b = bs)
+
         t = torch.randint(
                 0, self.diffusion.num_timesteps, (bs,),
                 device = self.accelerator.device, dtype = torch.int64
         )
 
         noise = torch.randn_like(x0, memory_format = torch.contiguous_format)
+
         x_noisy = self.diffusion.q_sample(
                 x_start = x0,
                 t = t,
                 noise = noise
         ).to(memory_format = torch.contiguous_format)
 
-        with torch.enable_grad():
+        with torch.enable_grad(), self.accelerator.accumulate(self.unet):
             with self.accelerator.autocast():
                 y = self.unet(x_noisy, t, t_emb)
             loss = torch.nn.functional.mse_loss(y, noise)
