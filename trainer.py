@@ -25,10 +25,10 @@ class SDVideoTrainer:
     def __init__(self,
             model: SDVideo,
             dataloader: DataLoader,
-            lr: 1e-4,
+            lr: float = 1e-4,
             scale_lr: bool = False, # scale lr by batch size * grad acc * gpus
-            lr_warmup: float = 0.,
-            lr_decay: float = 1.0, # aka annealing, if warmup + decay < 1.0 -> cyclic schedule
+            lr_warmup: float = 0.05,
+            lr_decay: float = 0.95, # aka annealing, if warmup + decay < 1.0 -> cyclic schedule
             epochs: int = 1,
             gradient_accumulation: int = 1,
             unconditional_ratio: float = 0., # percentage of unconditional training steps
@@ -44,9 +44,9 @@ class SDVideoTrainer:
             gradient_checkpointing: bool = False # lower vram usage, minimally slower
     ) -> None:
         """
-        Expects batches from dataloader in the following format:
-        'pixel_values': tensor shape b f c h w
-        'text': [str, ...] of length b
+        training expects batches from dataloader in the following format:
+        'pixel_values': tensor shape b f c h w  OR  shape b c f h w  if preencoded_img
+        'text': [str, ...] of length b  OR  tensor shape b 77 1024  if preencoded_txt
         """
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
