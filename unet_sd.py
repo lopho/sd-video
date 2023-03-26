@@ -270,7 +270,7 @@ class UNetSD(nn.Module):
     def enable_gradient_checkpointing(self, enable: bool = True) -> None:
         def recurse_enable_gradient_checkpointing(m):
             if hasattr(m, 'enable_gradient_checkpointing'):
-                m.enable_checkpointing(enable)
+                m.enable_gradient_checkpointing(enable)
         for c in self.children():
             c.apply(recurse_enable_gradient_checkpointing)
 
