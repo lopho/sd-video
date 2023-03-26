@@ -214,11 +214,11 @@ class SDVideoTrainer:
     @torch.no_grad()
     def step(self, batch: dict[str, torch.Tensor | list[str]]) -> torch.Tensor:
         if self.preencoded_img:
-            x0 = batch['pixel_values'].to(self.accel.device)
+            x0 = batch['pixel_values']
         else:
             x0 = self.prepare_img(batch['pixel_values'])
         if self.preencoded_txt:
-            t_emb = batch['text'].to(self.accel.device) if random.random() > self.unconditional_ratio else self.t_emb_uncond
+            t_emb = batch['text'] if random.random() > self.unconditional_ratio else self.t_emb_uncond
         else:
             t_emb = self.prepare_txt(batch['text'])
 
