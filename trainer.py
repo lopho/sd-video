@@ -39,7 +39,8 @@ class SDVideoTrainer:
             log_with: str | None = None,
             seed: int = 0,
             preencoded_img: bool = False,
-            preencoded_txt: bool = False
+            preencoded_txt: bool = False,
+            adam8bit: bool = False,
     ) -> None:
         """
         Expects batches from dataloader in the following format:
@@ -78,7 +79,14 @@ class SDVideoTrainer:
 
         if scale_lr:
             lr = lr * self.batch_size * self.accelerator.gradient_accumulation_steps * self.accelerator.num_processes
-        optimizer = torch.optim.AdamW(unet.parameters(), lr = lr)
+        optim_cls = torch.optim.AdamW
+        if adam8bit:
+            try:
+                import bitsandbytes as bnb
+                optim_cls = bnb.optim.AdamW8bit
+            except ImportError:
+                tqdm.write('install bitsandbytes to use 8-Bit AdamW')
+        optimizer = optim_cls(unet.parameters(), lr = lr)
         scheduler_steps = math.ceil((len(dataloader) * epochs) / (self.accelerator.gradient_accumulation_steps))
         scheduler = lr_dahd_cyclic(
                 optimizer,
