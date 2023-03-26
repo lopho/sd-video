@@ -164,6 +164,8 @@ class SDVideoTrainer:
             load_state: str | None = None,
             log_with: str | None = None,
             seed: int = 0,
+            preencoded_img: bool = False,
+            preencoded_txt: bool = False
     ) -> None:
         """
         Expects batches from dataloader in the following format:
@@ -179,9 +181,11 @@ class SDVideoTrainer:
         torch.backends.cuda.enable_math_sdp(True)
         torch._dynamo.config.cache_size_limit = 256
         torch._dynamo.config.allow_rnn = True
+
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+
         self.output_dir = output_dir
         self.accelerator = Accelerator(
             mixed_precision = 'fp16',
@@ -190,9 +194,9 @@ class SDVideoTrainer:
             dynamo_backend = 'inductor' if dynamo else None,
             log_with = log_with
         )
+
         unet = model.unet.train().requires_grad_(True)
         unet.enable_xformers(xformers)
-        model.vae.enable_xformers(xformers)
 
         self.batch_size = dataloader.batch_size
         self.epochs = epochs
@@ -214,15 +218,24 @@ class SDVideoTrainer:
         self.dataloader: DataLoader = self.accelerator.prepare(dataloader)
         self.unet: UNetSD = self.accelerator.prepare(unet)
         self.diffusion: GaussianDiffusion = model.diffusion.to(self.accelerator.device)
-        self.vae: AutoencoderKL = model.vae.to(self.accelerator.device)
-        self.text_encoder: FrozenOpenCLIPEmbedder = model.text_encoder.to(self.accelerator.device)
+        if not preencoded_img:
+            model.vae.enable_xformers(xformers)
+            self.vae: AutoencoderKL = model.vae.to(self.accelerator.device)
+        self.preencoded_img = preencoded_img
+        if not preencoded_txt:
+            self.text_encoder: FrozenOpenCLIPEmbedder = model.text_encoder.to(self.accelerator.device)
+        self.preencoded_txt = preencoded_txt
 
         if load_state is not None:
             self.accelerator.load_state(load_state)
 
         if unconditional_ratio > 0:
             with torch.no_grad(), self.accelerator.autocast():
-                self.t_emb_uncond = self.text_encoder([''] * dataloader.batch_size).to(dtype = torch.float32)
+                self.t_emb_uncond = model.text_encoder([''] * dataloader.batch_size).to(
+                        dtype = torch.float32,
+                        device = self.accelerator.device,
+                        memory_format = torch.contiguous_format
+                )
         self.unconditional_ratio = unconditional_ratio
 
     @torch.no_grad()
@@ -282,24 +295,36 @@ class SDVideoTrainer:
         self.accelerator.end_training()
 
     @torch.no_grad()
-    def step(self, batch: dict[str, torch.Tensor | str]) -> torch.Tensor:
-        frames = batch['pixel_values'].to(device = self.accelerator.device) # b f c h w
-        text = batch['text']
-
+    def prepare_txt(self, text: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         if random.random() < self.unconditional_ratio:
             t_emb = self.t_emb_uncond
         else:
             with self.accelerator.autocast():
                 t_emb = self.text_encoder(text).to(dtype = torch.float32)
+        return t_emb
 
+    @torch.no_grad()
+    def prepare_img(self, frames: torch.Tensor) -> torch.Tensor:
         bs = len(frames)
         frames = rearrange(frames, 'b f c h w -> (b f) c h w')
         with self.accelerator.autocast():
             x0 = self.vae.encode(frames).sample().to(dtype = torch.float32) * 0.18215
         x0 = rearrange(x0, '(b f) c h w -> b c f h w', b = bs)
+        return x0
+
+    @torch.no_grad()
+    def step(self, batch: dict[str, torch.Tensor | list[str]]) -> torch.Tensor:
+        if self.preencoded_img:
+            x0 = batch['pixel_values']
+        else:
+            x0 = self.prepare_img(batch['pixel_values'])
+        if self.preencoded_txt:
+            t_emb = batch['text'] if random.random() > self.unconditional_ratio else self.t_emb_uncond
+        else:
+            t_emb = self.prepare_txt(batch['text'])
 
         t = torch.randint(
-                0, self.diffusion.num_timesteps, (bs,),
+                0, self.diffusion.num_timesteps, (len(x0),),
                 device = self.accelerator.device, dtype = torch.int64
         )
 
