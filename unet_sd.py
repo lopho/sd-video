@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
+import torch.utils.checkpoint
 
 def exists(x):
     return x is not None
@@ -265,6 +266,13 @@ class UNetSD(nn.Module):
                 m.enable_xformers(enable)
         for c in self.children():
             c.apply(recurse_enable_xformers)
+
+    def enable_gradient_checkpointing(self, enable: bool = True) -> None:
+        def recurse_enable_gradient_checkpointing(m):
+            if hasattr(m, 'enable_gradient_checkpointing'):
+                m.enable_checkpointing(enable)
+        for c in self.children():
+            c.apply(recurse_enable_gradient_checkpointing)
 
     def forward(
             self,
@@ -660,37 +668,48 @@ class TemporalTransformer(nn.Module):
 class BasicTransformerBlock(nn.Module):
 
     def __init__(self,
-                 dim,
-                 n_heads,
-                 d_head,
-                 dropout=0.,
-                 context_dim=None,
-                 gated_ff=True,
-                 checkpoint=True,
-                 disable_self_attn=False):
+            dim,
+            n_heads,
+            d_head,
+            dropout = 0.,
+            context_dim = None,
+            gated_ff = True,
+            checkpoint = False,
+            disable_self_attn = False
+    ):
         super().__init__()
-        attn_cls = CrossAttention
         self.disable_self_attn = disable_self_attn
-        self.attn1 = attn_cls(
-            query_dim=dim,
-            heads=n_heads,
-            dim_head=d_head,
-            dropout=dropout,
-            context_dim=context_dim if self.disable_self_attn else
-            None)  # is a self-attention if not self.disable_self_attn
-        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
-        self.attn2 = attn_cls(
-            query_dim=dim,
-            context_dim=context_dim,
-            heads=n_heads,
-            dim_head=d_head,
-            dropout=dropout)  # is self-attn if context is none
+        self.attn1 = CrossAttention(
+                query_dim = dim,
+                heads = n_heads,
+                dim_head = d_head,
+                dropout = dropout,
+                context_dim = context_dim if self.disable_self_attn else
+                None
+        )  # is a self-attention if not self.disable_self_attn
+        self.ff = FeedForward(dim, dropout = dropout, glu = gated_ff)
+        self.attn2 = CrossAttention(
+                query_dim = dim,
+                context_dim = context_dim,
+                heads = n_heads,
+                dim_head = d_head,
+                dropout = dropout
+        )  # is self-attn if context is none
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, context=None):
+    def enable_gradient_checkpointing(self, enable = True) -> None:
+        self.checkpoint = enable
+
+    def forward(self, x, context = None):
+        if self.checkpoint:
+            return torch.utils.checkpoint.checkpoint(self._forward, x, context)
+        else:
+            return self._forward(x, context = context)
+
+    def _forward(self, x, context = None):
         x = self.attn1(
             self.norm1(x),
             context=context if self.disable_self_attn else None) + x
