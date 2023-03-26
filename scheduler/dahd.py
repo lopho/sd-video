@@ -58,7 +58,7 @@ def lr_dahd_cyclic(
             current_step = current_step - warmup + attack
             current_step = current_step % cycle_length
         if current_step < delay:
-            return min_lr
+            return min_lr if not in_warmup else 0.
         elif current_step < delay + scaled_attack:
             progress = (current_step - delay) / scaled_attack
             if in_warmup:

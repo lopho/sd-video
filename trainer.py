@@ -29,6 +29,7 @@ class SDVideoTrainer:
             scale_lr: bool = False, # scale lr by batch size * grad acc * gpus
             lr_warmup: float = 0.05,
             lr_decay: float = 0.95, # aka annealing, if warmup + decay < 1.0 -> cyclic schedule
+            lr_min: float = 0., # minimum lr
             epochs: int = 1,
             gradient_accumulation: int = 1,
             unconditional_ratio: float = 0., # percentage of unconditional training steps
@@ -101,7 +102,8 @@ class SDVideoTrainer:
                 optimizer,
                 delay = 1,
                 warmup = math.ceil(lr_warmup * scheduler_steps),
-                decay = math.ceil(lr_decay * scheduler_steps)
+                decay = math.ceil(lr_decay * scheduler_steps),
+                min_lr = lr_min
         )
 
         self.optimizer: torch.optim.Optimizer = self.accel.prepare(optimizer)
@@ -212,11 +214,11 @@ class SDVideoTrainer:
     @torch.no_grad()
     def step(self, batch: dict[str, torch.Tensor | list[str]]) -> torch.Tensor:
         if self.preencoded_img:
-            x0 = batch['pixel_values']
+            x0 = batch['pixel_values'].to(self.accel.device)
         else:
             x0 = self.prepare_img(batch['pixel_values'])
         if self.preencoded_txt:
-            t_emb = batch['text'] if random.random() > self.unconditional_ratio else self.t_emb_uncond
+            t_emb = batch['text'].to(self.accel.device) if random.random() > self.unconditional_ratio else self.t_emb_uncond
         else:
             t_emb = self.prepare_txt(batch['text'])
 
