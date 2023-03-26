@@ -66,10 +66,11 @@ model = SDVideo(
   from torch.utils.data import DataLoader
   from sd_video import SDVideo
   from functools import partial
-  from trainer import SDVideoTrainer, MiniTestSet, collate_fn
+  from trainer import SDVideoTrainer
+  from dataloader.gif import GifSet, gif_collate_fn
   model = SDVideo('path/to/model')
-  # example dataset, expects folder with gifs + text files (0001.gif, 0001.gif.txt)
-  dataset = MiniTestSet('path/to/dataset')
+  # example dataset, expects folder with gifs + text files (0001.gif, 0001.txt)
+  dataset = GifSet('path/to/dataset')
   # if you write your own dataset and collate_fn
   # the trainer expects batches in the following format:
   # { 'pixel_values': tensor with shape b f c h w,
@@ -80,7 +81,7 @@ model = SDVideo(
       batch_size = 1,
       shuffle = True,
       num_workers = 4,
-      collate_fn = partial(collate_fn,
+      collate_fn = partial(gif_collate_fn,
               num_frames = 16,
               image_size = (256,256),
               dtype = torch.float32)

@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 
 import torch._dynamo
 from accelerate import Accelerator
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader
 from einops import rearrange
 
 from sd_video import SDVideo
@@ -18,133 +18,7 @@ from unet_sd import UNetSD
 from autoencoder import AutoencoderKL
 from clip_embedder import FrozenOpenCLIPEmbedder
 
-from PIL import Image, ImageOps
-
-
-class MiniTestSet(Dataset):
-    def __init__(self, path: str, cap_ext: str = 'txt') -> None:
-        super().__init__()
-        self.files = sorted(
-                os.path.join(path, f)
-                for f in os.listdir(path)
-                if not f.endswith(f'.{cap_ext}')
-        )
-        self.cap_ext = cap_ext
-
-    def __getitem__(self, index) -> tuple[str, str]: # file/folder path, caption path
-        f = self.files[index]
-        return f, f'{f}.{self.cap_ext}'
-
-    def __len__(self) -> int:
-        return len(self.files)
-
-    def __iter__(self):
-        for i in range(len(self)):
-            yield self[i]
-
-def collate_fn(
-        batch: list[tuple[str, str]],
-        num_frames: int = 16,
-        image_size: tuple[int, int] = (256, 256),
-        dtype = torch.float32
-) -> dict[str, torch.Tensor | str]:
-    captions: list[str] = []
-    videos: list[torch.Tensor] = []
-    for s in batch:
-        with open(s[1], 'r') as f:
-            captions.append(f.read().strip())
-        # just assume its a gif for now
-        im = Image.open(s[0])
-        im.load()
-        frames: list[torch.Tensor] = []
-        while len(frames) < num_frames:
-            # ping pong loop if too short
-            dir = 1
-            try:
-                imf = ImageOps.fit(im.convert('RGB'), image_size, method = Image.Resampling.LANCZOS)
-                x = torch.tensor(np.asarray(imf))
-                frames.append(x)
-                im.seek(im.tell() + dir)
-            except EOFError:
-                dir = -1
-                im.seek(im.tell() + dir)
-        im.close()
-        xs = torch.stack(frames) # f h w c
-        videos.append(xs)
-    videos = torch.stack(videos) # b f h w c
-    videos = videos.permute(0, 1, 4, 2, 3).to(dtype).div(255).mul(2).sub(1).to(memory_format = torch.contiguous_format)
-    return { 'pixel_values': videos, 'text': captions }
-
-
-
-def lr_dahd_cyclic(
-        optimizer: torch.optim.Optimizer,
-        warmup: int = 0,
-        delay: int = 0,
-        attack: int = 0,
-        hold: int = 0,
-        decay: int = 0,
-        min_lr: float = 0.0,
-        max_lr: float = 1.0,
-        time_scale: float = 1.0,
-        last_step: int = -1
-) -> torch.optim.lr_scheduler.LambdaLR:
-    """
-    Delay-Attack-Hold-Decay signal envelope
-            |const| cos |const| cos |const| cos   ...
-    max_lr  |           A=====V                 A ...
-            |        A           V           A
-    min_lr  |=====A                 V=====A
-            |delay|attack|hold|decay|delay|attack ...
-            | -"- |warmup| ---""--- | ------""--- ...
-            |------- cycle 1 -------|---- cycle 2 ...
-    constant lr (max_lr):
-        hold = 0 or 1, delay = 0, attack = 0, decay = 0
-    constant lr (min_lr):
-        delay = 1, attack = 0, hold = 0, decay = 0
-    constant lr ((max_lr + min_lr) / 2):
-        attack or decay = 1, delay = 0, hold = 0, attack or decay = 0
-    constant with warmup (from 0 to max_lr):
-        warmup > 0
-    cosine lr (cyclic if attack + decay < total steps):
-        attack == decay, hold = 0, delay = 0
-    cosine annealing (with hard restarts if decay < total steps):
-        decay > 0, delay = 0, attack = 0, hold = 0
-    cosine annealing with warmup:
-        warmup > 0, decay = total - warmup, delay = 0, attack = Any, hold = 0
-    """
-    assert warmup >= 0
-    assert delay >= 0
-    assert attack >= 0
-    assert hold >= 0
-    assert decay >= 0
-    if warmup == 0:
-        warmup = attack
-    cycle_length = delay + attack + hold + decay
-    scale_lr = max_lr - min_lr
-    def lr_lambda(current_step: int) -> float:
-        if cycle_length == 0:
-            return max_lr
-        current_step = round(current_step * time_scale)
-        in_warmup = current_step < (delay + warmup)
-        scaled_attack = warmup if in_warmup else attack
-        if not in_warmup:
-            current_step = current_step - warmup + attack
-            current_step = current_step % cycle_length
-        if current_step < delay:
-            return min_lr
-        elif current_step < delay + scaled_attack:
-            progress = (current_step - delay) / scaled_attack
-            if in_warmup:
-                return max(0.0, 1.0 - 0.5 * (1.0 + math.cos(math.pi * progress))) * max_lr
-            else:
-                return max(0.0, 1.0 - 0.5 * (1.0 + math.cos(math.pi * progress))) * scale_lr + min_lr
-        elif current_step < delay + scaled_attack + hold:
-            return max_lr
-        else:
-            progress = (current_step - (delay + scaled_attack + hold)) / decay
-            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress))) * scale_lr + min_lr
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_step)
+from scheduler.dahd import lr_dahd_cyclic
 
 
 class SDVideoTrainer:
