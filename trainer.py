@@ -19,6 +19,7 @@ from autoencoder import AutoencoderKL
 from clip_embedder import FrozenOpenCLIPEmbedder
 
 from scheduler.dahd import lr_dahd_cyclic
+from diffusers_patching import patch_diffusers_transformer_checkpointing
 
 
 class SDVideoTrainer:
@@ -70,12 +71,13 @@ class SDVideoTrainer:
             log_with = log_with
         )
 
-        if model.use_diffusers:
-            model.unet._supports_gradient_checkpointing = True
         unet = model.unet.train().requires_grad_(True).to(self.accel.device)
         unet.set_use_memory_efficient_attention_xformers(xformers)
         if gradient_checkpointing:
-            unet.enable_gradient_checkpointing()
+            if model.use_diffusers:
+                patch_diffusers_transformer_checkpointing(unet)
+            else:
+                unet.enable_gradient_checkpointing()
         else:
             unet.disable_gradient_checkpointing()
         if dynamo:
