@@ -70,6 +70,8 @@ class SDVideoTrainer:
             log_with = log_with
         )
 
+        if model.use_diffusers:
+            model.unet._supports_gradient_checkpointing = True
         unet = model.unet.train().requires_grad_(True).to(self.accel.device)
         unet.set_use_memory_efficient_attention_xformers(xformers)
         if gradient_checkpointing:
@@ -240,7 +242,7 @@ class SDVideoTrainer:
 
         with torch.enable_grad(), self.accel.accumulate(self.unet):
             with self.accel.autocast():
-                y = self.unet(x_noisy, t, t_emb).to(dtype = torch.float32)
+                y = self.unet(x_noisy, t, t_emb).sample.to(dtype = torch.float32)
             loss = torch.nn.functional.mse_loss(y, noise)
             self.accel.backward(loss)
             if self.accel.sync_gradients:
