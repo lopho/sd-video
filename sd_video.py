@@ -19,38 +19,47 @@ class SDVideo:
             model_path: str,
             device: str | torch.device = torch.device('cpu'),
             dtype: torch.dtype = torch.float32,
-            amp: bool = True
+            amp: bool = True,
+            use_diffusers: bool = False,
+            diffusers_ckpt: str | None = None
     ) -> None:
         self.device = torch.device(device)
         self.dtype = dtype
         self.amp = amp
+        self.use_diffusers = use_diffusers
         with open(os.path.join(model_path, 'configuration.json'), 'r') as f:
             self.config: dict[str, Any] = json.load(f)
         cfg = self.config['model']['model_cfg']
         cfg['temporal_attention'] = True if cfg[
             'temporal_attention'] == 'True' else False
         self.default_frames = self.config['model']['model_args']['max_frames']
-
-        self.unet: UNetSD = UNetSD(
-                in_dim = cfg['unet_in_dim'],
-                dim = cfg['unet_dim'],
-                y_dim = cfg['unet_y_dim'],
-                context_dim = cfg['unet_context_dim'],
-                out_dim = cfg['unet_out_dim'],
-                dim_mult = cfg['unet_dim_mult'],
-                num_heads = cfg['unet_num_heads'],
-                head_dim = cfg['unet_head_dim'],
-                num_res_blocks = cfg['unet_res_blocks'],
-                attn_scales = cfg['unet_attn_scales'],
-                dropout = cfg['unet_dropout'],
-                temporal_attention = cfg['temporal_attention']
-        )
-        self.unet.load_state_dict(
-                torch.load(os.path.join(model_path, self.config['model']['model_args']['ckpt_unet'])),
-                strict = True
-        )
-        self.unet = self.unet.to(dtype).eval().requires_grad_(False)
-        self.unet = self.unet.to(device, memory_format = torch.contiguous_format)
+        if not self.use_diffusers:
+            self.unet: UNetSD = UNetSD(
+                    in_dim = cfg['unet_in_dim'],
+                    dim = cfg['unet_dim'],
+                    y_dim = cfg['unet_y_dim'],
+                    context_dim = cfg['unet_context_dim'],
+                    out_dim = cfg['unet_out_dim'],
+                    dim_mult = cfg['unet_dim_mult'],
+                    num_heads = cfg['unet_num_heads'],
+                    head_dim = cfg['unet_head_dim'],
+                    num_res_blocks = cfg['unet_res_blocks'],
+                    attn_scales = cfg['unet_attn_scales'],
+                    dropout = cfg['unet_dropout'],
+                    temporal_attention = cfg['temporal_attention'],
+                    diffusers_compat = True
+            )
+            self.unet.load_state_dict(
+                    torch.load(os.path.join(model_path, self.config['model']['model_args']['ckpt_unet'])),
+                    strict = True
+            )
+            self.unet = self.unet.to(dtype).eval().requires_grad_(False)
+            self.unet = self.unet.to(device, memory_format = torch.contiguous_format)
+        else:
+            from diffusers import UNet3DConditionModel
+            self.unet: UNet3DConditionModel = UNet3DConditionModel.from_pretrained(diffusers_ckpt)
+            self.unet = self.unet.to(dtype).eval().requires_grad_(False)
+            self.unet = self.unet.to(device, memory_format = torch.contiguous_format)
 
         betas = beta_schedule(
                 'linear_sd',
@@ -95,7 +104,7 @@ class SDVideo:
         self.text_encoder = self.text_encoder.to(device, memory_format = torch.contiguous_format)
 
     def enable_xformers(self, enable: bool = True) -> 'SDVideo':
-        self.unet.enable_xformers(enable)
+        self.unet.set_use_memory_efficient_attention_xformers(enable)
         self.vae.enable_xformers(enable)
         return self
 

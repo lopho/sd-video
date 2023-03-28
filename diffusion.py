@@ -103,8 +103,8 @@ class GaussianDiffusion(nn.Module):
             # classifier-free guidance
             # (model_kwargs[0]: conditional kwargs; model_kwargs[1]: non-conditional kwargs)
             assert isinstance(model_kwargs, list) and len(model_kwargs) == 2
-            y_out = model(xt, self._scale_timesteps(t), **model_kwargs[0])
-            u_out = model(xt, self._scale_timesteps(t), **model_kwargs[1])
+            y_out = model(xt, self._scale_timesteps(t), model_kwargs[0]['y']).sample
+            u_out = model(xt, self._scale_timesteps(t), model_kwargs[1]['y']).sample
             dim = y_out.size(1) if self.var_type.startswith(
                 'fixed') else y_out.size(1) // 2
             a = u_out[:, :dim]

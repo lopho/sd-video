@@ -71,8 +71,11 @@ class SDVideoTrainer:
         )
 
         unet = model.unet.train().requires_grad_(True).to(self.accel.device)
-        unet.enable_xformers(xformers)
-        unet.enable_gradient_checkpointing(gradient_checkpointing)
+        unet.set_use_memory_efficient_attention_xformers(xformers)
+        if gradient_checkpointing:
+            unet.enable_gradient_checkpointing()
+        else:
+            unet.disable_gradient_checkpointing()
         if dynamo:
             import logging
             torch._dynamo.config.cache_size_limit = 256

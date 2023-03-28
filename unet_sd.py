@@ -7,13 +7,6 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 import torch.utils.checkpoint
 
-def exists(x):
-    return x is not None
-
-def default(val, d):
-    if exists(val):
-        return val
-    return d() if callable(d) else d
 
 _xformers_imported = False
 try:
@@ -23,30 +16,47 @@ except ImportError:
     _xformers_imported = False
 
 
+def exists(x):
+    return x is not None
+
+def default(val, d):
+    if exists(val):
+        return val
+    return d() if callable(d) else d
+
+
+class UNetDiffusersCompatOutput:
+    def __init__(self, sample: torch.Tensor) -> None:
+        self.sample = sample
+
+
 class UNetSD(nn.Module):
 
     def __init__(self,
-                 in_dim=7,
-                 dim=512,
-                 y_dim=512,
-                 context_dim=512,
-                 out_dim=6,
-                 dim_mult=[1, 2, 3, 4],
-                 num_heads=None,
-                 head_dim=64,
-                 num_res_blocks=3,
-                 attn_scales=[1 / 2, 1 / 4, 1 / 8],
-                 use_scale_shift_norm=True,
-                 dropout=0.1,
-                 temporal_attn_times=2,
-                 temporal_attention=True,
-                 use_checkpoint=False,
-                 use_image_dataset=False,
-                 use_fps_condition=False,
-                 use_sim_mask=False):
+            in_dim: int = 7,
+            dim: int = 512,
+            y_dim: int = 512,
+            context_dim: int = 512,
+            out_dim: int = 6,
+            dim_mult: list[int] = [1, 2, 3, 4],
+            num_heads: int | None = None,
+            head_dim: int = 64,
+            num_res_blocks: int = 3,
+            attn_scales: list[float] = [1 / 2, 1 / 4, 1 / 8],
+            use_scale_shift_norm: bool = True,
+            dropout: float = 0.1,
+            temporal_attn_times: int = 2,
+            temporal_attention: bool = True,
+            use_checkpoint: bool = False,
+            use_image_dataset: bool = False,
+            use_fps_condition: bool = False,
+            use_sim_mask: bool = False,
+            diffusers_compat: bool = False
+    ) -> None:
+        super().__init__()
         embed_dim = dim * 4
         num_heads = num_heads if num_heads else dim // 32
-        super(UNetSD, self).__init__()
+        self.diffusers_compat = diffusers_compat
         self.in_dim = in_dim
         self.dim = dim
         self.y_dim = y_dim
@@ -252,8 +262,8 @@ class UNetSD(nn.Module):
 
         self._use_xformers: bool = False
 
-    def enable_xformers(self, enable: bool = True) -> None:
-        if enable:
+    def set_use_memory_efficient_attention_xformers(self, valid: bool = True, attention_op = None) -> None:
+        if valid:
             if not _xformers_imported:
                 self._use_xformers = False
                 print('xformers library not found, please install xformers first')
@@ -262,29 +272,36 @@ class UNetSD(nn.Module):
         else:
             self._use_xformers = False
         def recurse_enable_xformers(m):
-            if hasattr(m, 'enable_xformers'):
-                m.enable_xformers(enable)
+            if hasattr(m, 'set_use_memory_efficient_attention_xformers'):
+                m.set_use_memory_efficient_attention_xformers(valid, attention_op)
         for c in self.children():
             c.apply(recurse_enable_xformers)
 
-    def enable_gradient_checkpointing(self, enable: bool = True) -> None:
+    def enable_gradient_checkpointing(self) -> None:
         def recurse_enable_gradient_checkpointing(m):
             if hasattr(m, 'enable_gradient_checkpointing'):
-                m.enable_gradient_checkpointing(enable)
+                m.enable_gradient_checkpointing()
         for c in self.children():
             c.apply(recurse_enable_gradient_checkpointing)
 
-    def forward(
-            self,
-            x,
-            t,
-            y,
-            fps=None,
-            video_mask=None,
-            focus_present_mask=None,
-            prob_focus_present=0.,
-            mask_last_frame_num=0  # mask last frame num
-    ):
+    def disable_gradient_checkpointing(self) -> None:
+        def recurse_disable_gradient_checkpointing(m):
+            if hasattr(m, 'disable_gradient_checkpointing'):
+                m.disable_gradient_checkpointing()
+        for c in self.children():
+            c.apply(recurse_disable_gradient_checkpointing)
+
+
+    def forward(self,
+            x: torch.Tensor,
+            t: torch.Tensor,
+            y: torch.Tensor,
+            fps: float | None = None,
+            video_mask: torch.Tensor | None = None,
+            focus_present_mask: torch.Tensor | None = None,
+            prob_focus_present: float = 0.,
+            mask_last_frame_num: int = 0  # mask last frame num
+    ) -> torch.Tensor:
         """
         prob_focus_present: probability at which a given batch sample will focus on the present
                             (0. is all off, 1. is completely arrested attention across time)
@@ -304,17 +321,18 @@ class UNetSD(nn.Module):
         time_rel_pos_bias = None
         # embeddings
         if self.use_fps_condition and fps is not None:
-            e = self.time_embed(sinusoidal_embedding(
-                t, self.dim)) + self.fps_embedding(
-                    sinusoidal_embedding(fps, self.dim))
+            e = (
+                    self.time_embed(sinusoidal_embedding(t, self.dim)) +
+                    self.fps_embedding(sinusoidal_embedding(fps, self.dim))
+            )
         else:
             e = self.time_embed(sinusoidal_embedding(t, self.dim))
         context = y
 
         # repeat f times for spatial e and context
         f = x.shape[2]
-        e = e.repeat_interleave(repeats=f, dim=0)
-        context = context.repeat_interleave(repeats=f, dim=0)
+        e = e.repeat_interleave(repeats = f, dim = 0)
+        context = context.repeat_interleave(repeats = f, dim = 0)
 
         # always in shape (b f) c h w, except for temporal layer
         x = rearrange(x, 'b c f h w -> (b f) c h w')
@@ -341,13 +359,16 @@ class UNetSD(nn.Module):
                 time_rel_pos_bias,
                 focus_present_mask,
                 video_mask,
-                reference=xs[-1] if len(xs) > 0 else None)
+                reference = xs[-1] if len(xs) > 0 else None)
 
         # head
         x = self.out(x)
         # reshape back to (b c f h w)
-        x = rearrange(x, '(b f) c h w -> b c f h w', b=batch)
-        return x
+        x = rearrange(x, '(b f) c h w -> b c f h w', b = batch)
+        if self.diffusers_compat:
+            return UNetDiffusersCompatOutput(x)
+        else:
+            return x
 
     def _forward_single(self,
                         module,
@@ -399,7 +420,7 @@ def sinusoidal_embedding(timesteps, dim):
     # compute sinusoidal embedding
     sinusoid = torch.outer(
         timesteps, torch.pow(10000,
-                             -torch.arange(half).to(timesteps).div(half)))
+                             -torch.arange(half, dtype=timesteps.dtype, device=timesteps.device).div(half)))
     x = torch.cat([torch.cos(sinusoid), torch.sin(sinusoid)], dim=1)
     if dim % 2 != 0:
         x = torch.cat([x, torch.zeros_like(x[:, :1])], dim=1)
@@ -430,8 +451,8 @@ class CrossAttention(nn.Module):
 
         self._use_xformers = False
 
-    def enable_xformers(self, enable: bool = True) -> None:
-        self._use_xformers = enable and _xformers_imported
+    def set_use_memory_efficient_attention_xformers(self, valid: bool = True, attention_op = None) -> None:
+        self._use_xformers = valid and _xformers_imported
 
     def forward(self, x, context=None, mask=None):
         if self._use_xformers:
@@ -700,8 +721,11 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def enable_gradient_checkpointing(self, enable = True) -> None:
-        self.checkpoint = enable
+    def enable_gradient_checkpointing(self) -> None:
+        self.checkpoint = True
+
+    def disable_gradient_checkpointing(self) -> None:
+        self.checkpoint = False
 
     def forward(self, x, context = None):
         if self.checkpoint:
